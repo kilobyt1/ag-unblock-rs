@@ -25,7 +25,19 @@ ag-unblock verify              # проверить DNS-подмену, серт
 
 ## Сборка
 
+### Linux
+
 ```bash
+cargo build --release
+```
+
+### Windows (x86_64-pc-windows-gnu)
+
+На Windows без установленного MSVC проект компилируется с помощью [w64devkit](https://github.com/skeeto/w64devkit) (нужен для сборки C-части `ring`). Чтобы не перехватывать штатный линкер `rust-mingw`, передавайте `CC` и `AR` напрямую без добавления `w64devkit\bin` в `PATH`:
+
+```powershell
+$env:CC = 'C:\w64devkit\bin\gcc.exe'
+$env:AR = 'C:\w64devkit\bin\ar.exe'
 cargo build --release
 ```
 
