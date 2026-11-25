@@ -42,3 +42,7 @@ cargo build --release
 ```
 
 Готовые бинарники под Linux и Windows x64 доступны в [Releases](../../releases).
+
+## Контрибьюторы
+
+- **Google Gemini** — кроссплатформенный порт на Rust, сборка под Linux/Windows 10 и отладка.
