@@ -155,7 +155,12 @@ fn find_bin_targets() -> Vec<PathBuf> {
 
 #[cfg(not(windows))]
 fn find_js_targets() -> Vec<PathBuf> {
-    vec![PathBuf::from("/opt/antigravity-ide-Linux/resources/app/out/main.js")]
+    let home = home_dir();
+    vec![
+        PathBuf::from("/opt/antigravity-ide-Linux/resources/app/out/main.js"),
+        home.join("Desktop/Antigravity IDE/resources/app/out/main.js"),
+        home.join("Desktops/Desktop1/Antigravity IDE/resources/app/out/main.js"),
+    ]
 }
 
 #[cfg(windows)]
@@ -612,15 +617,77 @@ fn cmd_verify() -> ExitCode {
     if ok { ExitCode::SUCCESS } else { ExitCode::from(1) }
 }
 
+#[cfg(windows)]
+fn enable_utf8_console() {
+    extern "system" {
+        fn SetConsoleOutputCP(code_page_id: u32) -> i32;
+        fn SetConsoleCP(code_page_id: u32) -> i32;
+    }
+    unsafe {
+        SetConsoleOutputCP(65001);
+        SetConsoleCP(65001);
+    }
+}
+
+#[cfg(not(windows))]
+fn enable_utf8_console() {}
+
+fn run_menu() -> ExitCode {
+    let stdin = io::stdin();
+    let mut line = String::new();
+    loop {
+        println!("\n=== ag-unblock ===");
+        println!("  1. Статус (файлы и DNS)");
+        println!("  2. Применить патч (apply)");
+        println!("  3. Применить патч без проверки Node.js (apply --no-node)");
+        println!("  4. Откатить патч (revert)");
+        println!("  5. Проверить сеть и сертификаты (verify)");
+        println!("  0. Выход");
+        print!("\nВыберите действие [0-5]: ");
+        let _ = io::stdout().flush();
+
+        line.clear();
+        match stdin.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+
+        println!();
+        match line.trim() {
+            "1" => { let _ = cmd_status(); }
+            "2" => { let _ = cmd_apply(false); }
+            "3" => { let _ = cmd_apply(true); }
+            "4" => { let _ = cmd_revert(); }
+            "5" => { let _ = cmd_verify(); }
+            "0" | "q" | "exit" => break,
+            _ => {
+                println!("Неизвестный пункт. Введите цифру от 0 до 5.");
+                continue;
+            }
+        }
+
+        print!("\nНажмите Enter, чтобы вернуться в меню...");
+        let _ = io::stdout().flush();
+        line.clear();
+        if matches!(stdin.read_line(&mut line), Ok(0) | Err(_)) {
+            break;
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
+    enable_utf8_console();
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        None => run_menu(),
         Some("status") => cmd_status(),
         Some("apply") => cmd_apply(args[1..].iter().any(|a| a == "--no-node")),
         Some("revert") => cmd_revert(),
         Some("verify") => cmd_verify(),
         _ => {
-            eprintln!("Использование: ag-unblock <status | apply [--no-node] | revert | verify>");
+            eprintln!("Использование: ag-unblock [status | apply [--no-node] | revert | verify]");
             ExitCode::from(2)
         }
     }
