@@ -18,13 +18,17 @@
 
 ```text
 === ag-unblock ===
+Чат поддержки: https://t.me/+_jsj3pvTqwc4Yzg6
   1. Статус (файлы и DNS)
   2. Применить патч (apply)
   3. Применить патч без проверки Node.js (apply --no-node)
   4. Откатить патч (revert)
   5. Проверить сеть и сертификаты (verify)
+  6. Открыть чат поддержки (Telegram)
   0. Выход
 ```
+
+Чат поддержки (Telegram): https://t.me/+_jsj3pvTqwc4Yzg6
 
 Также поддерживается прямой CLI-режим:
 

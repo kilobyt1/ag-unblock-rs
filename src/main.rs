@@ -16,6 +16,7 @@ use x509_parser::prelude::parse_x509_certificate;
 
 const OLD: &[u8] = b"ineligible";
 const NEW: &[u8] = b"inexigible";
+const SUPPORT_URL: &str = "https://t.me/+_jsj3pvTqwc4Yzg6";
 
 const GATE_HOSTS: &[&str] = &[
     "daily-cloudcode-pa.googleapis.com",
@@ -632,18 +633,31 @@ fn enable_utf8_console() {
 #[cfg(not(windows))]
 fn enable_utf8_console() {}
 
+fn open_url(url: &str) {
+    println!("Чат поддержки: {url}");
+    #[cfg(windows)]
+    let res = Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    #[cfg(not(windows))]
+    let res = Command::new("xdg-open").arg(url).spawn();
+    if let Err(e) = res {
+        println!("Не удалось открыть браузер автоматически ({e}). Скопируйте ссылку выше вручную.");
+    }
+}
+
 fn run_menu() -> ExitCode {
     let stdin = io::stdin();
     let mut line = String::new();
     loop {
         println!("\n=== ag-unblock ===");
+        println!("Чат поддержки: {SUPPORT_URL}");
         println!("  1. Статус (файлы и DNS)");
         println!("  2. Применить патч (apply)");
         println!("  3. Применить патч без проверки Node.js (apply --no-node)");
         println!("  4. Откатить патч (revert)");
         println!("  5. Проверить сеть и сертификаты (verify)");
+        println!("  6. Открыть чат поддержки (Telegram)");
         println!("  0. Выход");
-        print!("\nВыберите действие [0-5]: ");
+        print!("\nВыберите действие [0-6]: ");
         let _ = io::stdout().flush();
 
         line.clear();
@@ -660,9 +674,10 @@ fn run_menu() -> ExitCode {
             "3" => { let _ = cmd_apply(true); }
             "4" => { let _ = cmd_revert(); }
             "5" => { let _ = cmd_verify(); }
+            "6" => { open_url(SUPPORT_URL); }
             "0" | "q" | "exit" => break,
             _ => {
-                println!("Неизвестный пункт. Введите цифру от 0 до 5.");
+                println!("Неизвестный пункт. Введите цифру от 0 до 6.");
                 continue;
             }
         }
@@ -686,8 +701,12 @@ fn main() -> ExitCode {
         Some("apply") => cmd_apply(args[1..].iter().any(|a| a == "--no-node")),
         Some("revert") => cmd_revert(),
         Some("verify") => cmd_verify(),
+        Some("support") => {
+            open_url(SUPPORT_URL);
+            ExitCode::SUCCESS
+        }
         _ => {
-            eprintln!("Использование: ag-unblock [status | apply [--no-node] | revert | verify]");
+            eprintln!("Использование: ag-unblock [status | apply [--no-node] | revert | verify | support]");
             ExitCode::from(2)
         }
     }
