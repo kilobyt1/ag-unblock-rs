@@ -1,4 +1,5 @@
 target/
 backup/
+paths.txt
 Cargo.lock.bak
 *.tmp

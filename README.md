@@ -25,6 +25,7 @@
   4. Откатить патч (revert)
   5. Проверить сеть и сертификаты (verify)
   6. Открыть чат поддержки (Telegram)
+  7. Добавить папку/файл вручную
   0. Выход
 ```
 
@@ -33,11 +34,14 @@
 Также поддерживается прямой CLI-режим:
 
 ```bash
-ag-unblock status              # состояние целей и DNS
-ag-unblock apply [--no-node]   # наложить патчи (с сохранением оригиналов в backup/)
-ag-unblock revert              # откатить все файлы из backup/
-ag-unblock verify              # проверить DNS-подмену, сертификаты Google и 401 от gate-хоста
+ag-unblock status                    # состояние целей и DNS
+ag-unblock apply [--no-node]         # наложить патчи (с сохранением оригиналов в backup/)
+ag-unblock revert                    # откатить все файлы из backup/
+ag-unblock verify                    # проверка DNS, TLS, IPv4/IPv6, геолокации Google и 401
+ag-unblock add-path "/путь/к/папке"  # сохранить кастомную папку/файл в paths.txt
 ```
+
+К `status`, `apply` и `revert` можно также передавать `--path "<путь>"` разово.
 
 На Windows перед `apply` / `revert` закройте Antigravity / Antigravity IDE / `agy.exe`.
 

@@ -1,9 +1,8 @@
-#[cfg(windows)]
 use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
@@ -23,6 +22,7 @@ const GATE_HOSTS: &[&str] = &[
     "cloudcode-pa.googleapis.com",
     "aicode.googleapis.com",
 ];
+const AUTH_HOST: &str = "oauth2.googleapis.com";
 
 const JS_PATTERN: &str = concat!(
     r#"async\s+([A-Za-z_$0-9]+)\(([A-Za-z_$0-9]+)\)\s*\{\s*"#,
@@ -127,7 +127,120 @@ fn ensure_backup(p: &Path) -> io::Result<PathBuf> {
     Ok(dst)
 }
 
-#[cfg(windows)]
+fn paths_file() -> PathBuf {
+    env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("paths.txt")))
+        .unwrap_or_else(|| PathBuf::from("paths.txt"))
+}
+
+fn clean_path(raw: &str) -> PathBuf {
+    let trimmed = raw.trim().trim_matches('"').trim_matches('\'');
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        return home_dir().join(rest);
+    }
+    PathBuf::from(trimmed)
+}
+
+fn load_saved_paths() -> Vec<PathBuf> {
+    let Ok(text) = fs::read_to_string(paths_file()) else {
+        return Vec::new();
+    };
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(clean_path)
+        .collect()
+}
+
+fn expand_custom_path(p: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut bins = Vec::new();
+    let mut jss = Vec::new();
+    if p.is_file() {
+        let is_js = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("js"))
+            .unwrap_or(false);
+        if is_js {
+            jss.push(p.to_path_buf());
+        } else {
+            bins.push(p.to_path_buf());
+        }
+        return (bins, jss);
+    }
+    if p.is_dir() {
+        for sub in [
+            p.join("resources").join("bin"),
+            p.join("resources").join("app").join("extensions").join("antigravity").join("bin"),
+            p.join("bin"),
+            p.to_path_buf(),
+        ] {
+            if let Ok(entries) = fs::read_dir(&sub) {
+                for entry in entries.flatten() {
+                    let fp = entry.path();
+                    if !fp.is_file() {
+                        continue;
+                    }
+                    let Some(name) = fp.file_name().and_then(|n| n.to_str()) else {
+                        continue;
+                    };
+                    let lower = name.to_lowercase();
+                    let skip_ext = lower.ends_with(".json")
+                        || lower.ends_with(".js")
+                        || lower.ends_with(".txt")
+                        || lower.ends_with(".tmp");
+                    if skip_ext {
+                        continue;
+                    }
+                    let is_target = if cfg!(windows) {
+                        (lower.starts_with("language_server") && lower.ends_with(".exe"))
+                            || lower == "agy.exe"
+                    } else {
+                        lower.starts_with("language_server") || lower == "agy"
+                    };
+                    if is_target {
+                        bins.push(fp);
+                    }
+                }
+            }
+        }
+        let main_js = p.join("resources").join("app").join("out").join("main.js");
+        if main_js.is_file() {
+            jss.push(main_js);
+        }
+    }
+    (bins, jss)
+}
+
+fn save_custom_path(raw: &str) -> String {
+    let p = clean_path(raw);
+    if !p.exists() {
+        return format!("путь не найден: {}", p.display());
+    }
+    let (bins, jss) = expand_custom_path(&p);
+    let saved = load_saved_paths();
+    let key = if cfg!(windows) {
+        p.to_string_lossy().to_lowercase()
+    } else {
+        p.to_string_lossy().into_owned()
+    };
+    let exists = saved.iter().any(|x| {
+        let xk = if cfg!(windows) {
+            x.to_string_lossy().to_lowercase()
+        } else {
+            x.to_string_lossy().into_owned()
+        };
+        xk == key
+    });
+    if !exists {
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(paths_file()) {
+            let _ = writeln!(f, "{}", p.display());
+        }
+    }
+    format!("добавлено: {} (найдено целей: {})", p.display(), bins.len() + jss.len())
+}
+
 fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -145,23 +258,28 @@ fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 #[cfg(not(windows))]
-fn find_bin_targets() -> Vec<PathBuf> {
+fn find_bin_targets(extra: &[PathBuf]) -> Vec<PathBuf> {
     let home = home_dir();
-    vec![
+    let mut out = vec![
         PathBuf::from("/opt/antigravity-Linux/resources/bin/language_server"),
         home.join(".gemini/bin/agy"),
         home.join(".local/bin/agy"),
-    ]
+    ];
+    for cp in load_saved_paths().into_iter().chain(extra.iter().cloned()) {
+        let (cb, _) = expand_custom_path(&cp);
+        out.extend(cb);
+    }
+    dedup_paths(out)
 }
 
 #[cfg(not(windows))]
-fn find_js_targets() -> Vec<PathBuf> {
-    let home = home_dir();
-    vec![
-        PathBuf::from("/opt/antigravity-ide-Linux/resources/app/out/main.js"),
-        home.join("Desktop/Antigravity IDE/resources/app/out/main.js"),
-        home.join("Desktops/Desktop1/Antigravity IDE/resources/app/out/main.js"),
-    ]
+fn find_js_targets(extra: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = vec![PathBuf::from("/opt/antigravity-ide-Linux/resources/app/out/main.js")];
+    for cp in load_saved_paths().into_iter().chain(extra.iter().cloned()) {
+        let (_, cj) = expand_custom_path(&cp);
+        out.extend(cj);
+    }
+    dedup_paths(out)
 }
 
 #[cfg(windows)]
@@ -180,7 +298,7 @@ fn win_roots() -> Vec<PathBuf> {
 }
 
 #[cfg(windows)]
-fn find_bin_targets() -> Vec<PathBuf> {
+fn find_bin_targets(extra: &[PathBuf]) -> Vec<PathBuf> {
     let home = home_dir();
     let mut cands = vec![
         home.join(".gemini").join("bin").join("agy.exe"),
@@ -217,17 +335,25 @@ fn find_bin_targets() -> Vec<PathBuf> {
             }
         }
     }
+    for cp in load_saved_paths().into_iter().chain(extra.iter().cloned()) {
+        let (cb, _) = expand_custom_path(&cp);
+        cands.extend(cb);
+    }
     let unique = dedup_paths(cands);
     let existing: Vec<PathBuf> = unique.iter().filter(|p| p.is_file()).cloned().collect();
     if existing.is_empty() { unique.into_iter().take(4).collect() } else { existing }
 }
 
 #[cfg(windows)]
-fn find_js_targets() -> Vec<PathBuf> {
-    let cands: Vec<PathBuf> = win_roots()
+fn find_js_targets(extra: &[PathBuf]) -> Vec<PathBuf> {
+    let mut cands: Vec<PathBuf> = win_roots()
         .into_iter()
         .map(|r| r.join("resources").join("app").join("out").join("main.js"))
         .collect();
+    for cp in load_saved_paths().into_iter().chain(extra.iter().cloned()) {
+        let (_, cj) = expand_custom_path(&cp);
+        cands.extend(cj);
+    }
     let unique = dedup_paths(cands);
     let existing: Vec<PathBuf> = unique.iter().filter(|p| p.is_file()).cloned().collect();
     if existing.is_empty() { unique.into_iter().take(2).collect() } else { existing }
@@ -440,6 +566,30 @@ fn resolve_v4(host: &str) -> Vec<Ipv4Addr> {
     ips
 }
 
+fn resolve_v6(host: &str) -> Vec<Ipv6Addr> {
+    let Ok(addrs) = (host, 443u16).to_socket_addrs() else {
+        return Vec::new();
+    };
+    let mut ips = Vec::new();
+    for addr in addrs {
+        if let IpAddr::V6(v6) = addr.ip() {
+            if !ips.contains(&v6) {
+                ips.push(v6);
+            }
+        }
+    }
+    ips
+}
+
+fn is_direct_google_ip(ip: Ipv4Addr) -> bool {
+    let [a, b, ..] = ip.octets();
+    matches!((a, b), (172, 217) | (142, 250) | (142, 251) | (216, 58))
+}
+
+fn is_blocked_country(c: &str) -> bool {
+    matches!(c.trim().to_uppercase().as_str(), "RU" | "BY" | "RUSSIA" | "BELARUS")
+}
+
 fn tls_config() -> Arc<ClientConfig> {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -450,18 +600,101 @@ fn tls_config() -> Arc<ClientConfig> {
     )
 }
 
-fn connect_tls(host: &str, ip: Ipv4Addr, cfg: Arc<ClientConfig>) -> Result<StreamOwned<ClientConnection, TcpStream>, String> {
-    let addr = SocketAddr::new(IpAddr::V4(ip), 443);
-    let mut tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(8))
+fn connect_tls_ip(host: &str, ip: IpAddr, timeout_s: u64, cfg: Arc<ClientConfig>) -> Result<StreamOwned<ClientConnection, TcpStream>, String> {
+    let addr = SocketAddr::new(ip, 443);
+    let mut tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(timeout_s))
         .map_err(|e| format!("TCP: {e}"))?;
-    let _ = tcp.set_read_timeout(Some(Duration::from_secs(12)));
-    let _ = tcp.set_write_timeout(Some(Duration::from_secs(12)));
+    let _ = tcp.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = tcp.set_write_timeout(Some(Duration::from_secs(10)));
     let sni = ServerName::try_from(host.to_string()).map_err(|e| format!("SNI: {e}"))?;
     let mut conn = ClientConnection::new(cfg, sni).map_err(|e| format!("TLS init: {e}"))?;
     while conn.is_handshaking() {
         conn.complete_io(&mut tcp).map_err(|e| format!("TLS handshake: {e}"))?;
     }
     Ok(StreamOwned::new(conn, tcp))
+}
+
+fn connect_tls(host: &str, ip: Ipv4Addr, cfg: Arc<ClientConfig>) -> Result<StreamOwned<ClientConnection, TcpStream>, String> {
+    connect_tls_ip(host, IpAddr::V4(ip), 8, cfg)
+}
+
+fn https_get(host: &str, ip: IpAddr, path: &str, extra_headers: &str, cfg: Arc<ClientConfig>) -> Result<String, String> {
+    let mut stream = connect_tls_ip(host, ip, 5, cfg)?;
+    let req = format!(
+        "GET {path} HTTP/1.1\r\n\
+         Host: {host}\r\n\
+         User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36\r\n\
+         Accept-Language: en-US,en;q=0.9\r\n\
+         Accept-Encoding: identity\r\n\
+         {extra_headers}\
+         Connection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).map_err(|e| format!("write: {e}"))?;
+    stream.flush().map_err(|e| format!("flush: {e}"))?;
+    let mut buf = Vec::new();
+    if let Err(e) = stream.read_to_end(&mut buf) {
+        if buf.is_empty() {
+            return Err(format!("read: {e}"));
+        }
+    }
+    let raw = String::from_utf8_lossy(&buf);
+    Ok(raw.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_else(|| raw.into_owned()))
+}
+
+struct CfTrace {
+    ip: String,
+    loc: String,
+    colo: String,
+}
+
+fn cf_trace(ipv6: bool, cfg: Arc<ClientConfig>) -> Option<CfTrace> {
+    let ip: IpAddr = if ipv6 {
+        IpAddr::V6(*resolve_v6("www.cloudflare.com").first()?)
+    } else {
+        IpAddr::V4(*resolve_v4("www.cloudflare.com").first()?)
+    };
+    let body = https_get("www.cloudflare.com", ip, "/cdn-cgi/trace", "", cfg).ok()?;
+    let (mut out_ip, mut loc, mut colo) = (String::new(), String::new(), String::new());
+    for line in body.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            match k.trim() {
+                "ip" => out_ip = v.trim().to_string(),
+                "loc" => loc = v.trim().to_string(),
+                "colo" => colo = v.trim().to_string(),
+                _ => {}
+            }
+        }
+    }
+    if out_ip.is_empty() { None } else { Some(CfTrace { ip: out_ip, loc, colo }) }
+}
+
+fn google_geo_country(cfg: Arc<ClientConfig>) -> Option<String> {
+    if let Some(&ip) = resolve_v4("policies.google.com").first() {
+        if let Ok(html) = https_get("policies.google.com", IpAddr::V4(ip), "/terms?hl=en", "", cfg.clone()) {
+            let re = RegexBuilder::new(r"Country version:</a>\s*([^<\n]+)")
+                .unicode(false)
+                .build()
+                .ok()?;
+            if let Some(caps) = re.captures(html.as_bytes()) {
+                let s = String::from_utf8_lossy(caps.get(1)?.as_bytes()).trim().to_string();
+                if !s.is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    if let Some(&ip) = resolve_v4("www.youtube.com").first() {
+        if let Ok(html) = https_get("www.youtube.com", IpAddr::V4(ip), "/?hl=en", "Cookie: SOCS=CAI\r\n", cfg) {
+            let re = RegexBuilder::new(r#""countryCode":"([A-Z]{2})""#)
+                .unicode(false)
+                .build()
+                .ok()?;
+            if let Some(caps) = re.captures(html.as_bytes()) {
+                return Some(String::from_utf8_lossy(caps.get(1)?.as_bytes()).into_owned());
+            }
+        }
+    }
+    None
 }
 
 fn cert_info(host: &str, ip: Ipv4Addr, cfg: Arc<ClientConfig>) -> String {
@@ -508,9 +741,9 @@ fn probe_gate(host: &str, ip: Ipv4Addr, cfg: Arc<ClientConfig>) -> Result<String
 
 // --- команды ---------------------------------------------------------------
 
-fn cmd_status() -> ExitCode {
+fn cmd_status(extra: &[PathBuf]) -> ExitCode {
     println!("=== Клиентский гейт: патч ineligible -> inexeligible ===");
-    for p in find_bin_targets() {
+    for p in find_bin_targets(extra) {
         println!("  {}", p.display());
         if !p.exists() {
             println!("      нет файла");
@@ -529,7 +762,7 @@ fn cmd_status() -> ExitCode {
 
     println!("\n=== IDE: JS-обработчик отказа ===");
     let re = js_regex();
-    for p in find_js_targets() {
+    for p in find_js_targets(extra) {
         println!("  {}", p.display());
         if !p.exists() {
             println!("      нет файла");
@@ -545,7 +778,7 @@ fn cmd_status() -> ExitCode {
     }
 
     println!("\n=== Сеть: DNS-подмена gate-хостов (системный резолвер) ===");
-    for h in GATE_HOSTS {
+    for &h in GATE_HOSTS.iter().chain(std::iter::once(&AUTH_HOST)) {
         let ips: Vec<String> = resolve_v4(h).into_iter().map(|ip| ip.to_string()).collect();
         let line = if ips.is_empty() { "НЕ РАЗРЕШАЕТСЯ".into() } else { ips.join(", ") };
         println!("  {h}\n      {line}");
@@ -553,13 +786,13 @@ fn cmd_status() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn cmd_apply(skip_node: bool) -> ExitCode {
+fn cmd_apply(skip_node: bool, extra: &[PathBuf]) -> ExitCode {
     println!("=== Бинари ===");
-    for p in find_bin_targets() {
+    for p in find_bin_targets(extra) {
         println!("  {}: {}", p.display(), patch_binary(&p));
     }
     println!("\n=== IDE JS ===");
-    for p in find_js_targets() {
+    for p in find_js_targets(extra) {
         println!("  {}: {}", p.display(), patch_js(&p, skip_node));
     }
     println!("\nБэкапы: {}", backup_dir().display());
@@ -567,11 +800,11 @@ fn cmd_apply(skip_node: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn cmd_revert() -> ExitCode {
-    for p in find_bin_targets() {
+fn cmd_revert(extra: &[PathBuf]) -> ExitCode {
+    for p in find_bin_targets(extra) {
         println!("  {}: {}", p.display(), revert_file(&p, "Antigravity / agy"));
     }
-    for p in find_js_targets() {
+    for p in find_js_targets(extra) {
         println!("  {}: {}", p.display(), revert_file(&p, "Antigravity IDE"));
     }
     ExitCode::SUCCESS
@@ -579,26 +812,76 @@ fn cmd_revert() -> ExitCode {
 
 fn cmd_verify() -> ExitCode {
     let mut ok = true;
+    let mut daily_ip: Option<Ipv4Addr> = None;
     let cfg = tls_config();
     println!("=== DNS-подмена + TLS ===");
-    for &h in GATE_HOSTS {
+    for &h in GATE_HOSTS.iter().chain(std::iter::once(&AUTH_HOST)) {
         let ips = resolve_v4(h);
         let Some(&ip) = ips.first() else {
             println!("  {h}: НЕ РАЗРЕШАЕТСЯ");
             ok = false;
             continue;
         };
+        if h == "daily-cloudcode-pa.googleapis.com" {
+            daily_ip = Some(ip);
+        }
+        if ip.is_loopback() {
+            println!("  {h}\n      {ip}\n      ВНИМАНИЕ: локальный редирект (остатки AG Unlocker / NRPT / hosts)");
+            ok = false;
+            continue;
+        }
         let info = cert_info(h, ip, cfg.clone());
         println!("  {h}\n      {ip}\n      сертификат: {info}");
         if !info.contains("Google") {
             println!("      ВНИМАНИЕ: сертификат не Google");
+            let lower = info.to_lowercase();
+            if lower.contains("10060") || lower.contains("timed out") || lower.contains("timeout") {
+                println!("      ПОДСКАЗКА: таймаут TLS handshake — проверьте TUN/MTU (в Happ: Sing-box вместо Xray TUN) или DPI/корп. VPN");
+            }
+            ok = false;
+        }
+    }
+
+    println!("\n=== Внешний IP и геолокация Google ===");
+    let cf4 = cf_trace(false, cfg.clone());
+    let cf6 = cf_trace(true, cfg.clone());
+    let loc4 = cf4.as_ref().map(|c| c.loc.as_str()).unwrap_or("");
+    let loc6 = cf6.as_ref().map(|c| c.loc.as_str()).unwrap_or("");
+    match &cf4 {
+        Some(c) => println!("  IPv4 (Cloudflare): {}  loc={}  colo={}", c.ip, c.loc, c.colo),
+        None => println!("  IPv4 (Cloudflare): недоступен"),
+    }
+    match &cf6 {
+        Some(c) => println!("  IPv6 (Cloudflare): {}  loc={}  colo={}", c.ip, c.loc, c.colo),
+        None => println!("  IPv6 (Cloudflare): нет / не используется"),
+    }
+
+    let g_country = google_geo_country(cfg.clone());
+    match &g_country {
+        Some(c) => println!("  Геолокация Google: {c}"),
+        None => println!("  Геолокация Google: не удалось определить"),
+    }
+
+    if let Some(ip) = daily_ip {
+        if is_direct_google_ip(ip) && is_blocked_country(loc4) {
+            println!("  ВНИМАНИЕ: нет ни VPN, ни DNS-подмены — трафик идёт напрямую из {loc4}");
+            ok = false;
+        }
+    }
+    if !loc4.is_empty() && !is_blocked_country(loc4) && is_blocked_country(loc6) {
+        println!("  ВНИМАНИЕ: утечка IPv6 мимо VPN ({loc6})");
+        ok = false;
+    }
+    if let Some(gc) = &g_country {
+        if is_blocked_country(gc) && !loc4.is_empty() && !is_blocked_country(loc4) {
+            println!("  ВНИМАНИЕ: Google считает ваш VPN-сервер российским ({gc}) — смените сервер/локацию или используйте DNS-подмену");
             ok = false;
         }
     }
 
     println!("\n=== Ответ сервера (401 = запрос дошёл до Google) ===");
     let h = "daily-cloudcode-pa.googleapis.com";
-    if let Some(&ip) = resolve_v4(h).first() {
+    if let Some(ip) = daily_ip.filter(|ip| !ip.is_loopback()) {
         match probe_gate(h, ip, cfg) {
             Ok(resp) => {
                 let preview: String = resp.chars().take(220).collect();
@@ -656,8 +939,9 @@ fn run_menu() -> ExitCode {
         println!("  4. Откатить патч (revert)");
         println!("  5. Проверить сеть и сертификаты (verify)");
         println!("  6. Открыть чат поддержки (Telegram)");
+        println!("  7. Добавить папку/файл вручную");
         println!("  0. Выход");
-        print!("\nВыберите действие [0-6]: ");
+        print!("\nВыберите действие [0-7]: ");
         let _ = io::stdout().flush();
 
         line.clear();
@@ -669,15 +953,23 @@ fn run_menu() -> ExitCode {
 
         println!();
         match line.trim() {
-            "1" => { let _ = cmd_status(); }
-            "2" => { let _ = cmd_apply(false); }
-            "3" => { let _ = cmd_apply(true); }
-            "4" => { let _ = cmd_revert(); }
+            "1" => { let _ = cmd_status(&[]); }
+            "2" => { let _ = cmd_apply(false, &[]); }
+            "3" => { let _ = cmd_apply(true, &[]); }
+            "4" => { let _ = cmd_revert(&[]); }
             "5" => { let _ = cmd_verify(); }
             "6" => { open_url(SUPPORT_URL); }
+            "7" => {
+                print!("Введите путь к папке установки или файлу: ");
+                let _ = io::stdout().flush();
+                let mut raw = String::new();
+                if stdin.read_line(&mut raw).is_ok() && !raw.trim().is_empty() {
+                    println!("{}", save_custom_path(&raw));
+                }
+            }
             "0" | "q" | "exit" => break,
             _ => {
-                println!("Неизвестный пункт. Введите цифру от 0 до 6.");
+                println!("Неизвестный пункт. Введите цифру от 0 до 7.");
                 continue;
             }
         }
@@ -692,21 +984,40 @@ fn run_menu() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn parse_extra_paths(args: &[String]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--path" && i + 1 < args.len() {
+            out.push(clean_path(&args[i + 1]));
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 fn main() -> ExitCode {
     enable_utf8_console();
     let args: Vec<String> = env::args().skip(1).collect();
+    let extra = if args.len() > 1 { parse_extra_paths(&args[1..]) } else { Vec::new() };
     match args.first().map(String::as_str) {
         None => run_menu(),
-        Some("status") => cmd_status(),
-        Some("apply") => cmd_apply(args[1..].iter().any(|a| a == "--no-node")),
-        Some("revert") => cmd_revert(),
+        Some("status") => cmd_status(&extra),
+        Some("apply") => cmd_apply(args[1..].iter().any(|a| a == "--no-node"), &extra),
+        Some("revert") => cmd_revert(&extra),
         Some("verify") => cmd_verify(),
+        Some("add-path") if args.len() >= 2 => {
+            println!("{}", save_custom_path(&args[1]));
+            ExitCode::SUCCESS
+        }
         Some("support") => {
             open_url(SUPPORT_URL);
             ExitCode::SUCCESS
         }
         _ => {
-            eprintln!("Использование: ag-unblock [status | apply [--no-node] | revert | verify | support]");
+            eprintln!("Использование: ag-unblock [status | apply [--no-node] | revert | verify | add-path <путь> | support] [--path <путь>]");
             ExitCode::from(2)
         }
     }
